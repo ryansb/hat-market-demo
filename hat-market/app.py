@@ -21,7 +21,7 @@ class Hat(Base):
     capacity = Column(String(127), nullable=True)
     description = Column(Text(), nullable=True)
     stock = Column(Integer)
-    # image_link = Column(Text(), nullable=True)
+    image_link = Column(Text(), nullable=True)
 
     def to_dict(self):
         return {
@@ -29,6 +29,7 @@ class Hat(Base):
             'capacity': self.capacity,
             'description': self.description,
             'stock': self.stock,
+            'image_link': self.image_link,
         }
 
 
@@ -59,6 +60,7 @@ def add_hat():
     h = Hat(
         capacity=incoming.get('capacity', ''),
         description=incoming.get('description', ''),
+        image_link=incoming.get('image_link', ''),
         stock=incoming['stock'],
     )
     session = db_session()
