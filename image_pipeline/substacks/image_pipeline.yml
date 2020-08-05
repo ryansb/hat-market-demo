@@ -1,0 +1,70 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  take the repo, make the images and tag them with the branch name in git and put the container images in ECR repo 
+
+Parameters:
+  Branch:
+    Description: git Branch
+    Type: String
+  ArtifactBucket:
+    Description: Artifact Bucket
+    Type: String
+  PipelineServiceRoleArn:
+    Description: Pipeline Service Role
+    Type: String
+  AppImagesRepo:
+    Description: ECR repo for the app
+    Type: String
+  DockerBuildProject:
+    Description: Docker Build Project
+    Type: String
+
+Outputs:
+  PipelineUrl:
+    Value: !Sub 'https://console.aws.amazon.com/codepipeline/home?region=${AWS::Region}#/view/${AppPipeline}'
+
+Resources:
+  AppPipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: !Sub docker-app-pipeline-${Branch}
+      RoleArn: !Ref PipelineServiceRoleArn
+      ArtifactStore:
+        Type: S3
+        Location: !Ref ArtifactBucket
+      Stages:
+        - Name: SOURCE
+          Actions:
+            - Name: PullSource
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Provider: S3
+                Version: '1'
+              Configuration:
+                S3Bucket: !Ref ArtifactBucket
+                S3ObjectKey: !Sub app-${Branch}.zip
+              OutputArtifacts:
+                - Name: Src
+              RunOrder: 1
+        - Name: BUILD
+          Actions:
+            - Name: app_build
+              RunOrder: 1
+              InputArtifacts:
+                - Name: Src
+              OutputArtifacts:
+                - Name: PackagedExoService
+              ActionTypeId:
+                Category: Build
+                Provider: CodeBuild
+                Owner: AWS
+                Version: '1'
+              Configuration:
+                ProjectName: !Ref DockerBuildProject
+                EnvironmentVariables: !Sub |
+                  [
+                    {"name":"IMAGE_NAME","value":"${AppImagesRepo}","type":"PLAINTEXT"},
+                    {"name":"BRANCH","value":"${Branch}","type":"PLAINTEXT"},
+                    {"name":"DOCKERFILE_PATH","value":"./Dockerfile","type":"PLAINTEXT"}
+                  ]

@@ -1,0 +1,80 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description:
+  Main stack for containerized applications
+Parameters:
+  ImageTag:
+    Description: Tag for the image to be deployed from EO ECR
+    Type: String
+  MigrationsTag:
+    Description: Tag for the image to be used to migrate to the new DB version
+    Default: ''
+    Type: String
+Conditions:
+  MigrationSupplied: !Not [!Equals [!Ref MigrationsTag, '']]
+
+Resources:
+  Network:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: vpc.yml
+      Parameters:
+        Component: HatMarket
+  RDS:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: rds.yml
+      Parameters:
+        DbSubnetA: !GetAtt Network.Outputs.PrivateSubnetA
+        DbSubnetB: !GetAtt Network.Outputs.PrivateSubnetB
+        DbSubnetC: !GetAtt Network.Outputs.PrivateSubnetC
+        DatabaseSg: !GetAtt Network.Outputs.DatabaseSg
+  ECSClusterStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: ecs-cluster.yml
+      Parameters:
+        VPCId: !GetAtt Network.Outputs.Id
+        ClusterName: !Ref AWS::StackName
+        DatabaseSg: !GetAtt Network.Outputs.DatabaseSg
+  ApplicationService:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: service-app.yml
+      Parameters:
+        ECSCluster: !GetAtt ECSClusterStack.Outputs.ECSCluster
+        SubnetIds: !Join
+        - ","
+        - - !GetAtt Network.Outputs.PublicSubnetA
+          - !GetAtt Network.Outputs.PublicSubnetB
+          - !GetAtt Network.Outputs.PublicSubnetC
+        PrivateSubnetIds: !Join
+        - ","
+        - - !GetAtt Network.Outputs.PrivateSubnetA
+          - !GetAtt Network.Outputs.PrivateSubnetB
+          - !GetAtt Network.Outputs.PrivateSubnetC
+        VPCId: !GetAtt Network.Outputs.Id
+        ServicesSecurityGroup: !GetAtt ECSClusterStack.Outputs.ServicesSecurityGroup
+        DesiredCount: 3
+        ContainerCpu: 256
+        ContainerMemory: 512
+        ContainerPort: 5000
+        ImageUrl: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/hat_store:${ImageTag}'
+        MigrateUrl: !If
+        - MigrationSupplied
+        - !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/hat_store:${MigrationsTag}'
+        - !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/hat_store:${ImageTag}'
+        DatabaseHostname: !GetAtt RDS.Outputs.Hostname
+        DatabaseSecret: !GetAtt RDS.Outputs.Secret
+Outputs:
+  EcsCluster:
+    Value: !GetAtt ECSClusterStack.Outputs.ECSCluster
+  ServiceUrl:
+    Value: !GetAtt ApplicationService.Outputs.ServiceUrl
+  PrivateSubnetA:
+    Value: !GetAtt Network.Outputs.PrivateSubnetA
+  PrivateSubnetB:
+    Value: !GetAtt Network.Outputs.PrivateSubnetB
+  PrivateSubnetC:
+    Value: !GetAtt Network.Outputs.PrivateSubnetC
+  AppServiceSg:
+    Value: !GetAtt ECSClusterStack.Outputs.ServicesSecurityGroup

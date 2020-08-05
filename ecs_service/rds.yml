@@ -1,0 +1,69 @@
+Parameters:
+  DbSubnetA:
+    Type: AWS::EC2::Subnet::Id
+  DbSubnetB:
+    Type: AWS::EC2::Subnet::Id
+  DbSubnetC:
+    Type: AWS::EC2::Subnet::Id
+  DatabaseSg:
+    Type: AWS::EC2::SecurityGroup::Id
+Resources:
+  SubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: PSQL group subnets
+      SubnetIds:
+      - !Ref DbSubnetA
+      - !Ref DbSubnetB
+      - !Ref DbSubnetC
+  DB:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      AllocatedStorage: '50'
+      AllowMajorVersionUpgrade: true
+      AutoMinorVersionUpgrade: true
+      DBInstanceClass: db.t3.small
+      DBName: howdy
+      DBSubnetGroupName: !Ref SubnetGroup
+      DeleteAutomatedBackups: true
+      MasterUsername: !Sub "{{resolve:secretsmanager:${DbSecret}::username}}"
+      MasterUserPassword: !Sub "{{resolve:secretsmanager:${DbSecret}::password}}"
+      DeletionProtection: false
+      Engine: postgres
+      EngineVersion: '12.3'
+      Port: '5432'
+      PubliclyAccessible: false
+      StorageEncrypted: true
+      BackupRetentionPeriod: 0
+      VPCSecurityGroups:
+      - !Ref DatabaseSg
+  DbSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Description: String
+      GenerateSecretString:
+        ExcludePunctuation: true
+        IncludeSpace: false
+        GenerateStringKey: password
+        PasswordLength: 16
+        RequireEachIncludedType: true
+        SecretStringTemplate: >
+          {"username": "app"}
+      #Name: DbSecret
+  DBHostSSM:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /hat-market/rds/db-hostname
+      Type: String
+      Value: !GetAtt DB.Endpoint.Address
+  DBSgSSM:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /hat-market/rds/db-sg-id
+      Type: String
+      Value: !Ref DatabaseSg
+Outputs:
+  Hostname:
+    Value: !GetAtt DB.Endpoint.Address
+  Secret:
+    Value: !Ref DbSecret

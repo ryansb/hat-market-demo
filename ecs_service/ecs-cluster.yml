@@ -1,0 +1,41 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description:
+  ECS Cluster
+Parameters:
+  VPCId:
+    Description: Id of the VPC that this Cluster will be in
+    Type: String
+  DatabaseSg:
+    Description: AMI ID
+    Type: String
+  ClusterName:
+    Description: Desired name for the ECS cluster
+    Type: String
+
+Resources:
+  Cluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Ref ClusterName
+  ServicesSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Access to the services
+      VpcId: !Ref VPCId
+  IngressToDb:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Ingress from ECS to RDS
+      GroupId: !Ref DatabaseSg
+      IpProtocol: tcp
+      ToPort: 5432
+      FromPort: 5432
+      SourceSecurityGroupId: !Ref ServicesSecurityGroup
+
+Outputs:
+  ECSCluster:
+    Description: ECS Cluster
+    Value: !Ref Cluster
+  ServicesSecurityGroup:
+    Description: Ecs services Security Group
+    Value: !Ref ServicesSecurityGroup

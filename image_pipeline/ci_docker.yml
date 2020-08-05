@@ -1,0 +1,196 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  take the repo, make the images and tag them with the branch name in git and put the container images in ECR repo 
+
+Parameters:
+  OrganizationId:
+    Default: ''
+    Description: AWS Organizations OU or organization ID for crossaccount access
+    Type: String
+Conditions:
+  HasOrgId: !Not [!Equals [OrganizationId, '']]
+Resources:
+
+  PipelineServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+              - codepipeline.amazonaws.com
+              - codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: root
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Resource:
+                  - !Sub arn:aws:s3:::${ArtifactBucket}
+                  - !Sub arn:aws:s3:::${ArtifactBucket}/*
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:GetBucketVersioning
+              - Sid: ExecuteEcrAndCodeBuild
+                Resource: "*"
+                Effect: Allow
+                Action:
+                  - codebuild:StartBuild
+                  - codebuild:BatchGetBuilds
+                  - iam:PassRole
+                  - ssm:GetParameter*
+                  - ecr:GetAuthorizationToken
+              - Sid: LoggingPolicy
+                Resource: "*"
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+              - Resource: !GetAtt Repo.Outputs.RepoArn
+                Effect: Allow
+                Action:
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:BatchGetImage
+                  - ecr:CompleteLayerUpload
+                  - ecr:DescribeImages
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:InitiateLayerUpload
+                  - ecr:PutImage
+                  - ecr:UploadLayerPart
+
+  DockerBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Artifacts:
+        Type: CODEPIPELINE
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: !Sub |
+          version: 0.2
+          phases:
+            pre_build:
+              commands:
+                - echo Logging in to Amazon ECR...
+                - aws --version
+                - $(aws ecr get-login --region $AWS_DEFAULT_REGION --no-include-email)
+                - REPOSITORY_URI=${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/$IMAGE_NAME
+            build:
+              commands:
+                - env
+                - cd hat-market
+                - >
+                    PRIOR_V=$(aws ecr describe-images --repository-name hat_store --filter tagStatus=TAGGED --query 'sort_by(imageDetails, &imagePushedAt)[].imageTags[]' --output text
+                    | tr '\t' '\n'
+                    | grep ${!BRANCH}
+                    | tail -n1)
+                - docker build -t "${!REPOSITORY_URI}:${!BRANCH}-$(echo $CODEBUILD_RESOLVED_SOURCE_VERSION | head -c8)" -f $DOCKERFILE_PATH .
+                - docker images
+                - |
+                    cat <<EOF > image-manifest.json
+                    {
+                      "Branch": "${!BRANCH}",
+                      "LatestTag": "${!BRANCH}-$(echo $CODEBUILD_RESOLVED_SOURCE_VERSION | head -c8)",
+                      "PriorTag": "${!PRIOR_V}"
+                    }
+                    EOF
+                - cat image-manifest.json
+            post_build:
+              commands:
+                # grab the list of image tags, latest-last
+                - docker push $REPOSITORY_URI
+                - zip image-manifest.zip image-manifest.json
+                - aws s3 cp image-manifest.zip s3://${ArtifactBucket}/${!BRANCH}-image-manifest.zip
+            install:
+              runtime-versions:
+                docker: 18
+                python: 3.8
+      Environment:
+        ComputeType: BUILD_GENERAL1_MEDIUM
+        Type: LINUX_CONTAINER
+        Image: aws/codebuild/standard:4.0
+        PrivilegedMode: true
+        EnvironmentVariables:
+          - Name: AWS_ACCOUNT_ID
+            Value: !Ref AWS::AccountId
+          - Name: AWS_DEFAULT_REGION
+            Value: !Ref AWS::Region
+      ServiceRole: !GetAtt PipelineServiceRole.Arn
+
+  DockerAppDevPipeline:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: substacks/image_pipeline.yml
+      Parameters:
+        Branch: dev
+        AppImagesRepo: !GetAtt Repo.Outputs.RepoName
+        ArtifactBucket: !Ref ArtifactBucket
+        PipelineServiceRoleArn: !GetAtt PipelineServiceRole.Arn
+        DockerBuildProject: !Ref DockerBuildProject
+
+  ArtifactBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub ci-docker-pipeline-${AWS::AccountId}-${AWS::Region}
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - ExpirationInDays: 7
+            Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+  BucketArnSSM:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /hats/artifacts/bucket-arn
+      Type: String
+      Value: !GetAtt ArtifactBucket.Arn
+  BucketNameSSM:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /hats/artifacts/bucket-name
+      Type: String
+      Value: !Ref ArtifactBucket
+  ArtifactBucketCrossAccountAccess:
+    Condition: HasOrgId
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ArtifactBucket
+      PolicyDocument:
+        Statement:
+          - Sid: AllowOrganizationAccounts
+            Action:
+              - s3:GetBucketLocation
+              - s3:GetBucketVersioning
+              - s3:GetObject
+              - s3:GetObjectVersion*
+              - s3:ListBucket
+              - s3:ListBucketVersion*
+            Effect: Allow
+            Resource:
+              - !Sub '${ArtifactBucket.Arn}'
+              - !Sub '${ArtifactBucket.Arn}/*'
+            Principal: '*'
+            Condition:
+              StringEquals:
+                'aws:PrincipalOrgID': !Ref OrganizationId
+
+  Repo:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: substacks/container_repo.yml
+      Parameters:
+        RepoName: hat_store
+Outputs:
+  DevPipelineUrl:
+    Value: !GetAtt DockerAppDevPipeline.Outputs.PipelineUrl

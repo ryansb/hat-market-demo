@@ -1,0 +1,101 @@
+Parameters:
+  RepoName:
+    Description: Name for your ECR repository
+    Default: ''
+    Type: String
+Outputs:
+  RepoName:
+    Value: !Ref Repo
+  RepoArn:
+    Value: !GetAtt Repo.Arn
+Conditions:
+  HasName: !Not [!Equals [!Ref RepoName, '']]
+Resources:
+  Repo:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !If [HasName, !Ref RepoName, !Ref AWS::NoValue]
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 5,
+                "description": "1 day buffer for untagged images",
+                "selection": {
+                  "tagStatus": "untagged",
+                  "countType": "sinceImagePushed",
+                  "countUnit": "days",
+                  "countNumber": 1
+                },
+                "action": {
+                  "type": "expire"
+                }
+              },
+              {
+                "rulePriority": 10,
+                "description": "limit to last 10 master image builds",
+                "selection": {
+                  "tagStatus": "tagged",
+                  "tagPrefixList": [ "master-" ],
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 10
+                },
+                "action": {
+                  "type": "expire"
+                }
+              },
+              {
+                "rulePriority": 15,
+                "description": "limit to last 5 staging image builds",
+                "selection": {
+                  "tagStatus": "tagged",
+                  "tagPrefixList": [ "staging-" ],
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 5
+                },
+                "action": {
+                  "type": "expire"
+                }
+              },
+              {
+                "rulePriority": 20,
+                "description": "limit to last 4 dev image builds",
+                "selection": {
+                  "tagStatus": "tagged",
+                  "tagPrefixList": [ "dev-" ],
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 4
+                },
+                "action": {
+                  "type": "expire"
+                }
+              }
+            ]
+          }
+
+      RepositoryPolicyText:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowCodeBuildAccess
+            Effect: Allow
+            Principal:
+              Service: "codebuild.amazonaws.com"
+            Action:
+              - ecr:GetDownloadUrlForLayer
+              - ecr:BatchGetImage
+              - ecr:BatchCheckLayerAvailability
+#           # for multi-account sharing, fill in account principals
+#         - Sid: AllowPull
+#           Effect: Allow
+#           Principal:
+#             AWS:
+#             - 'arn:aws:iam::0123456789:root' # youraccount
+#           Action:
+#             - 'ecr:GetAuthorizationToken'
+#             - 'ecr:BatchCheckLayerAvailability'
+#             - 'ecr:GetDownloadUrlForLayer'
+#             - 'ecr:BatchGetImage'
+#             - 'ecr:DescribeRepositories' # optional permission
+#             - 'ecr:DescribeImages' # optional permission
+

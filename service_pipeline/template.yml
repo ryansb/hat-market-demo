@@ -1,0 +1,484 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: |
+  Codepipeline stack that takes S3 zipped uploads from the artifact central bucket and deploys the service with DB migrations.
+Outputs:
+  PipelineUrl:
+    Value: !Sub 'https://console.aws.amazon.com/codepipeline/home?region=${AWS::Region}#/view/${Pipeline}'
+Parameters:
+  ArtifactInputKey:
+    Description: The name of the stack/stackset to be processed by this pipeline.
+    Type: String
+  InputBucketName:
+    Description: Source of the artifacts for this pipeline in the sharedservices account
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: /hats/artifacts/bucket-name
+  InputBucketArn:
+    Description: Source of the artifacts for this pipeline in the sharedservices account
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: /hats/artifacts/bucket-arn
+  Branch:
+    Description: Git branch to build the code from
+    Type: String
+    Default: dev
+  TargetStack:
+    Description: CFN stack to create the container infra in
+    Type: String
+    Default: hat-market-service
+  IacBranch:
+    Description: Git branch to build the cfn from
+    Type: String
+    Default: dev
+Resources:
+  CodeBuildServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+        Version: '2012-10-17'
+      Path: /iac-ci/
+      Policies:
+        - PolicyDocument:
+            Statement:
+              - Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogGroups
+                  - ecr:GetAuthorizationToken
+                Effect: Allow
+                Resource: '*'
+              - Action:
+                  - cloudformation:CreateChangeSet
+                  - cloudformation:Describe*
+                  - cloudformation:GetTemplate*
+                  - cloudformation:List*
+                  - cloudformation:ValidateTemplate
+                  - s3:ListAllMyBuckets
+                Effect: Allow
+                Resource: '*'
+              - Action:
+                  - s3:Get*
+                  - s3:ListBucket
+                  - s3:ListBucketVersions
+                  - s3:ListObjects
+                  - s3:PutObject
+                Effect: Allow
+                Resource:
+                  - !GetAtt SamDeploymentBucket.Arn
+                  - !Sub '${SamDeploymentBucket.Arn}/*'
+                  - !Ref InputBucketArn
+                  - !Sub '${InputBucketArn}/*'
+                  - !GetAtt PipelineArtifactsBucket.Arn
+                  - !Sub '${PipelineArtifactsBucket.Arn}/*'
+            Version: '2012-10-17'
+          PolicyName: root
+  CodebuildChangeSet:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        EnvironmentVariables:
+          - Name: REGION
+            Value: !Ref 'AWS::Region'
+          - Name: ACCOUNT
+            Value: !Ref 'AWS::AccountId'
+          - Name: SAM_CLI_TELEMETRY
+            Value: '0'
+        Image: aws/codebuild/standard:4.0
+        Type: LINUX_CONTAINER
+      ServiceRole: !GetAtt CodeBuildServiceRole.Arn
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: !Sub |
+          version: '0.2'
+          # Used to build for the production environment
+          phases:
+            install:
+              runtime-versions:
+                python: 3.8
+              commands:
+                - pip install -U aws-sam-cli cfn-lint
+                - apt-get install jq
+            pre_build:
+              commands:
+                - env | sort
+                - jq . "${!CODEBUILD_SRC_DIR_ManifestSrc}/image-manifest.json"
+            build:
+              commands:
+                - cd ecs_service
+                - >
+                    sam package
+                    --s3-bucket ${SamDeploymentBucket}
+                    --s3-prefix hat_market
+                    --template-file template.yml
+                    --output-template-file packaged.yml
+                - cfn-lint packaged.yml || true
+                - |
+                    cat <<EOF >stack-config-1.json
+                    {
+                      "Parameters": {
+                        "ImageTag": "$(jq -r .PriorTag "${!CODEBUILD_SRC_DIR_ManifestSrc}/image-manifest.json")",
+                        "MigrationsTag": "$(jq -r .LatestTag "${!CODEBUILD_SRC_DIR_ManifestSrc}/image-manifest.json")"
+                      }
+                    }
+                    EOF
+                - |
+                    cat <<EOF >stack-config-2.json
+                    {
+                      "Parameters": {
+                        "ImageTag": "$(jq -r .LatestTag "${!CODEBUILD_SRC_DIR_ManifestSrc}/image-manifest.json")",
+                        "MigrationsTag": "$(jq -r .LatestTag "${!CODEBUILD_SRC_DIR_ManifestSrc}/image-manifest.json")"
+                      }
+                    }
+                    EOF
+                - cat stack-config-1.json
+                - cat stack-config-2.json
+          artifacts:
+            files:
+            - packaged.yml
+            - stack-config-1.json
+            - stack-config-2.json
+            name: PackagedExoService
+            discard-paths: yes
+            base-directory: ecs_service/
+  Pipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      ArtifactStore:
+        Location: !Ref 'PipelineArtifactsBucket'
+        Type: S3
+      RoleArn: !GetAtt 'PipelineServiceRole.Arn'
+      Stages:
+        - Name: Source
+          Actions:
+            - ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Provider: S3
+                Version: '1'
+              Configuration:
+                S3Bucket: !Ref 'InputBucketName'
+                S3ObjectKey: !Sub '${ArtifactInputKey}-${IacBranch}.zip'
+              Name: CfTemplateBundle
+              OutputArtifacts:
+                - Name: ProjectSrc
+              RunOrder: 1
+            - ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Provider: S3
+                Version: '1'
+              Configuration:
+                S3Bucket: !Ref 'InputBucketName'
+                S3ObjectKey: !Sub '${Branch}-image-manifest.zip'
+              Name: ImageManifest
+              OutputArtifacts:
+                - Name: ManifestSrc
+              RunOrder: 1
+        - Name: PrepareDeploy
+          Actions:
+            - ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              Name: BuildSamTemplate
+              Configuration:
+                ProjectName: !Ref CodebuildChangeSet
+                PrimarySource: ProjectSrc
+              InputArtifacts:
+                - Name: ProjectSrc
+                - Name: ManifestSrc
+              OutputArtifacts:
+                - Name: PackagedService
+              RunOrder: 1
+            - ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: CloudFormation
+                Version: '1'
+              Name: CandidateChangeSet
+              Configuration:
+                ActionMode: CHANGE_SET_REPLACE
+                ChangeSetName: service-codepipeline-pre-migrate
+                RoleArn: !GetAtt CfnStackRole.Arn
+                TemplatePath: "PackagedService::packaged.yml"
+                StackName: !Ref TargetStack
+                Capabilities: CAPABILITY_IAM,CAPABILITY_AUTO_EXPAND
+                TemplateConfiguration: "PackagedService::stack-config-1.json"
+              InputArtifacts:
+                - Name: PackagedService
+              RunOrder: 2
+        - Name: DeployAndDbMigrations
+          Actions:
+            - ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: CloudFormation
+                Version: '1'
+              Name: ExecuteDbTaskDefinitionDeploy
+              Namespace: PreMigrate
+              Configuration:
+                ActionMode: CHANGE_SET_EXECUTE
+                ChangeSetName: service-codepipeline-pre-migrate
+                RoleArn: !GetAtt CfnStackRole.Arn
+                StackName: !Ref TargetStack
+                Capabilities: CAPABILITY_IAM,CAPABILITY_AUTO_EXPAND
+              RunOrder: 1
+            - ActionTypeId:
+                Category: Invoke
+                Owner: AWS
+                Provider: StepFunctions
+                Version: '1'
+              Name: RunDbMigration
+              Configuration:
+                StateMachineArn: !Ref DbMigrationFlow
+                ExecutionNamePrefix: CodePipelineExec
+                Input: >
+                  {
+                    "AppServiceSg": [
+                      "#{PreMigrate.AppServiceSg}"
+                    ],
+                    "PrivateSubnets": [
+                      "#{PreMigrate.PrivateSubnetA}",
+                      "#{PreMigrate.PrivateSubnetB}",
+                      "#{PreMigrate.PrivateSubnetC}"
+                    ]
+                  }
+              InputArtifacts:
+                - Name: PackagedService
+              RunOrder: 2
+            - ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: CloudFormation
+                Version: '1'
+              Name: CreateServiceChangeSet
+              Configuration:
+                ActionMode: CHANGE_SET_REPLACE
+                ChangeSetName: service-codepipeline-post-migrate
+                RoleArn: !GetAtt CfnStackRole.Arn
+                TemplatePath: "PackagedService::packaged.yml"
+                StackName: !Ref TargetStack
+                Capabilities: CAPABILITY_IAM,CAPABILITY_AUTO_EXPAND
+                TemplateConfiguration: "PackagedService::stack-config-2.json"
+              InputArtifacts:
+                - Name: PackagedService
+              RunOrder: 2
+            - ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: CloudFormation
+                Version: '1'
+              Name: DeployPhase2
+              Configuration:
+                ActionMode: CHANGE_SET_EXECUTE
+                ChangeSetName: service-codepipeline-post-migrate
+                RoleArn: !GetAtt CfnStackRole.Arn
+                StackName: !Ref TargetStack
+                Capabilities: CAPABILITY_IAM,CAPABILITY_AUTO_EXPAND
+              RunOrder: 3
+  PipelineArtifactsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      BucketName: !Sub '${AWS::StackName}-artifacts-${AWS::AccountId}-${AWS::Region}'
+      LifecycleConfiguration:
+        Rules:
+          - AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+            Id: DeleteIncompleteUploads
+            Status: Enabled
+          - Id: DeleteOldVersions
+            NoncurrentVersionExpirationInDays: 90
+            Status: Enabled
+      VersioningConfiguration:
+        Status: Enabled
+  PipelineNotificationsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName: iac-ci-notifications
+  CfnStackRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Action: sts:AssumeRole
+          Effect: Allow
+          Principal:
+            Service:
+            - cloudformation.amazonaws.com
+      Path: !Sub /${AWS::StackName}-${AWS::Region}/
+      ManagedPolicyArns:
+      - arn:aws:iam::aws:policy/AdministratorAccess
+  PipelineServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service:
+                - codepipeline.amazonaws.com
+                - codebuild.amazonaws.com
+                - lambda.amazonaws.com
+        Version: '2012-10-17'
+      Path: /iac-ci/
+      Policies:
+        - PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Action: s3:ListAllMyBuckets
+                Effect: Allow
+                Resource: '*'
+              - Action:
+                  - s3:Get*
+                  - s3:GetBucketVersioning
+                  - s3:ListBucket
+                  - s3:ListBucketVersions
+                  - s3:ListObjects
+                  - s3:PutObject
+                Effect: Allow
+                Resource:
+                  - !GetAtt PipelineArtifactsBucket.Arn
+                  - !Sub '${PipelineArtifactsBucket.Arn}/*'
+                  - !Ref InputBucketArn
+                  - !Sub '${InputBucketArn}/*'
+              - Action:
+                  - codebuild:BatchGetBuilds
+                  - codebuild:StartBuild
+                  - codepipeline:*
+                  - iam:ListRoles
+                  - iam:PassRole
+                  - kms:Decrypt
+                  - kms:DescribeKey
+                  - kms:Encrypt
+                  - kms:GenerateDataKey*
+                  - kms:ReEncrypt*
+                  - lambda:Invoke*
+                  - lambda:List*
+                  - s3:ListAllMyBuckets
+                  - sns:Publish
+                  - ssm:GetParameter*
+                Effect: Allow
+                Resource: '*'
+              - Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - ecr:GetAuthorizationToken
+                Effect: Allow
+                Resource: '*'
+              - Action:
+                  - cloudformation:CreateChangeSet
+                  - cloudformation:DeleteChangeSet
+                  - cloudformation:ExecuteChangeSet
+                  - cloudformation:Describe*
+                  - cloudformation:GetTemplate*
+                  - cloudformation:List*
+                  - cloudformation:ValidateTemplate
+                Effect: Allow
+                Resource: '*'
+              - Action: iam:PassRole
+                Effect: Allow
+                Resource: !GetAtt CfnStackRole.Arn
+              - Action: states:Describe*
+                Effect: Allow
+                Resource: '*'
+              - Action: states:StartExecution
+                Effect: Allow
+                Resource: !Ref DbMigrationFlow
+          PolicyName: root
+  SamDeploymentBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      BucketName: !Sub 'sam-${Branch}-${AWS::AccountId}-${AWS::Region}'
+      LifecycleConfiguration:
+        Rules:
+          - AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+            Id: DeleteIncompleteUploads
+            Status: Enabled
+  MigrationStateLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      RetentionInDays: 7
+  DbMigrationFlow:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      Logging:
+        Level: ALL
+        Destinations:
+          - CloudWatchLogsLogGroup:
+              LogGroupArn: !GetAtt MigrationStateLogs.Arn
+        IncludeExecutionData: TRUE
+      Definition:
+        StartAt: AwaitActiveTaskDefinition
+        States:
+          AwaitActiveTaskDefinition:
+            Type: Wait
+            Seconds: 60
+            Next: DbMigrationTask
+          DbMigrationTask:
+            Type: Task
+            Resource: arn:aws:states:::ecs:runTask.sync
+            Parameters:
+              LaunchType: FARGATE
+              Cluster: !Ref TargetStack
+              TaskDefinition: migrate
+              NetworkConfiguration:
+                AwsvpcConfiguration:
+                  SecurityGroups.$: $.AppServiceSg
+                  Subnets.$: $.PrivateSubnets
+            End: true
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            - Action:
+              - ecs:DescribeTasks
+              - ecs:StopTask
+              - states:DescribeExecution
+              - logs:CreateLogDelivery
+              - logs:GetLogDelivery
+              - logs:UpdateLogDelivery
+              - logs:DeleteLogDelivery
+              - logs:ListLogDeliveries
+              - logs:PutResourcePolicy
+              - logs:DescribeResourcePolicies
+              - logs:DescribeLogGroups
+              Effect: Allow
+              Resource: '*'
+            - Effect: Allow
+              Action: ecs:RunTask
+              Resource: !Sub arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:task-definition/migrate*
+            - Effect: Allow
+              Action:
+              - events:PutTargets
+              - events:PutRule
+              - events:DescribeRule
+              Resource:
+              - !Sub arn:${AWS::Partition}:events:${AWS::Region}:${AWS::AccountId}:rule/StepFunctionsGetEventsForECSTaskRule
+            - Effect: Allow
+              Action: iam:PassRole
+              Resource: '*'
+              Condition:
+                StringEquals:
+                  iam:PassedToService:
+                    - ecs.amazonaws.com
+                    - ecs-tasks.amazonaws.com

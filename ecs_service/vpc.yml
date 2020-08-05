@@ -1,0 +1,157 @@
+Parameters:
+  Component:
+    Type: String
+Resources:
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 172.16.0.0/16
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${Component}-vpc"
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref IGW
+  IGW:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub "${Component}-gateway"
+  PublicA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 172.16.10.0/24
+      AvailabilityZone: !Select
+      - 0
+      - Fn::GetAZs: !Ref AWS::Region
+  PublicB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 172.16.11.0/24
+      AvailabilityZone: !Select
+      - 1
+      - Fn::GetAZs: !Ref AWS::Region
+  PublicC:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 172.16.12.0/24
+      AvailabilityZone: !Select
+      - 2
+      - Fn::GetAZs: !Ref AWS::Region
+  PrivateA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 172.16.20.0/24
+      AvailabilityZone: !Select
+      - 0
+      - Fn::GetAZs: !Ref AWS::Region
+  PrivateB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 172.16.21.0/24
+      AvailabilityZone: !Select
+      - 1
+      - Fn::GetAZs: !Ref AWS::Region
+  PrivateC:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 172.16.22.0/24
+      AvailabilityZone: !Select
+      - 2
+      - Fn::GetAZs: !Ref AWS::Region
+  PublicRouting:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+  PrivateRouting:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+  DefaultRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      GatewayId: !Ref IGW
+      DestinationCidrBlock: 0.0.0.0/0
+      RouteTableId: !Ref PublicRouting
+  PublicRouteA:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicA
+      RouteTableId: !Ref PublicRouting
+  PublicRouteB:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicB
+      RouteTableId: !Ref PublicRouting
+  PublicRouteC:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicC
+      RouteTableId: !Ref PublicRouting
+  PrivateRouteA:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateA
+      RouteTableId: !Ref PrivateRouting
+  PrivateRouteB:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateB
+      RouteTableId: !Ref PrivateRouting
+  PrivateRouteC:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateC
+      RouteTableId: !Ref PrivateRouting
+  NatIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+  NGW:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatIP.AllocationId
+      SubnetId: !Ref PublicB
+      Tags:
+      - Key: Name
+        Value: !Ref Component
+  NatGatewayRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NGW
+      RouteTableId: !Ref PrivateRouting
+  DbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: PSQL db
+      VpcId: !Ref VPC
+Outputs:
+  Id:
+    Value: !Ref VPC
+  Cidr:
+    Value: 172.16.0.0/16
+  PublicSubnetA:
+    Value: !Ref PublicA
+  PrivateSubnetA:
+    Value: !Ref PrivateA
+  PublicSubnetB:
+    Value: !Ref PublicB
+  PrivateSubnetB:
+    Value: !Ref PrivateB
+  PublicSubnetC:
+    Value: !Ref PublicC
+  PrivateSubnetC:
+    Value: !Ref PrivateC
+  DatabaseSg:
+    Value: !Ref DbSecurityGroup
