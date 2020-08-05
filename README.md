@@ -8,6 +8,7 @@ For more info about SAM and CI/CD see the [Trek10 AWS CI/CD Quickstart][qs]
 1. Image pipeline
 2. Service pipeline
 3. Zip this repo and copy to `infra-dev.zip` and `app-dev.zip` in the S3 bucket
+4. Observe the CodePipeline execution and watch stack outputs for the app URL
 
 
 [qs]: https://github.com/aws-quickstart/quickstart-trek10-serverless-enterprise-cicd
